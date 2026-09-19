@@ -1105,14 +1105,14 @@ Will use HTML5 for this SASsession.""")
         zz = z[0].rpartition("\nE3969440A681A24088859985" + prev +'\n')
         logd = zz[2].replace(mj.decode(), '')
 
-        logger.debug("DEBUG raw log start ->\n{0}\n<- DEBUG - raw log end\n".format(logf))
-        #logger.debug("DEBUG - final={0}\n".format(final))
-        #logger.debug("DEBUG - types={0}\n".format(types))
-        #logger.debug("DEBUG - z={0}\n".format(z))
-        #logger.debug("DEBUG - prev={0}\n".format(prev))
-        #logger.debug("DEBUG - zz={0}\n".format(zz))
-        logger.debug("DEBUG - clean log start ->\n{0}\n<- DEBUG - clean log end\n".format(logd))
-        logger.debug("DEBUG - clean lst start ->\n{0}\n<- DEBUG - clean lst end\n".format(lstd))
+        logger.debug("DEBUG raw log start ->\n%s\n<- DEBUG - raw log end\n", logf)
+        #logger.debug("DEBUG - final=%s\n", final)
+        #logger.debug("DEBUG - types=%s\n", types)
+        #logger.debug("DEBUG - z=%s\n", z)
+        #logger.debug("DEBUG - prev=%s\n", prev)
+        #logger.debug("DEBUG - zz=%s\n", zz)
+        logger.debug("DEBUG - clean log start ->\n%s\n<- DEBUG - clean log end\n", logd)
+        logger.debug("DEBUG - clean lst start ->\n%s\n<- DEBUG - clean lst end\n", lstd)
 
         if re.search(r'\nERROR[ \d-]*:', logd):
             warnings.warn("Noticed 'ERROR:' in LOG, you ought to take a look and see if there was a problem")
@@ -1135,7 +1135,7 @@ Will use HTML5 for this SASsession.""")
             sas_linetype_mapping
             types = types.partition(b"TomSaysTypes=")[2]
             types = list(types.rpartition(logcodeo)[0].decode(errors='replace'))
-            logger.debug("DEBUG - processing 'lines' - types={0}\n".format(types))
+            logger.debug("DEBUG - processing 'lines' - types=%s\n", types)
 
             logl = []
             logs = logd.split('\n')
@@ -1144,9 +1144,9 @@ Will use HTML5 for this SASsession.""")
             l_types = len(types)
             maxlines=l_logs if l_logs <= l_types else l_types
 
-            logger.debug("DEBUG - processing 'lines' - l_logs={0}".format(l_logs))
-            logger.debug("DEBUG - processing 'lines' - l_types={0}".format(l_types))
-            logger.debug("DEBUG - processing 'lines' - maxlines={0}".format(maxlines))
+            logger.debug("DEBUG - processing 'lines' - l_logs=%d", l_logs)
+            logger.debug("DEBUG - processing 'lines' - l_types=%d", l_types)
+            logger.debug("DEBUG - processing 'lines' - maxlines=%d", maxlines)
 
             for i in range(maxlines):
                 logl.append({'line':logs[i], 'type':sas_linetype_mapping[int(types[i])]})
@@ -3474,14 +3474,31 @@ Will use HTML5 for this SASsession.""")
             schema = pa.schema(fields)
             return schema
         # derive parque schema if not defined by user.
+        timestamp_idx = []
+        time64_idx = []
+        date32_idx = []
         if "schema" not in parquet_kwargs or parquet_kwargs["schema"] is None:
             custom_schema = False
             parquet_kwargs["schema"] = dts_to_pyarrow_schema(dts)
         else:
             custom_schema = True
+
+            # from_pandas has no string->timestamp/string->time64/string->date32 cast kernel,
+            # so those columns are streamed as strings and routed through _parse_sas_ts_string
+            # afterwards instead, as sasdata2arrow does, rather than letting from_pandas attempt
+            # (and fail) the cast itself.
+            timestamp_idx = [i for i in range(nvars) if pa.types.is_timestamp(parquet_kwargs["schema"].field(dvarlist[i]).type)]
+            time64_idx = [i for i in range(nvars) if pa.types.is_time(parquet_kwargs["schema"].field(dvarlist[i]).type)]
+            date32_idx = [i for i in range(nvars) if pa.types.is_date32(parquet_kwargs["schema"].field(dvarlist[i]).type)]
         pandas_kwargs["schema"] = parquet_kwargs["schema"]
 
-        ##### START STERAM #####
+        #if any timestamp, time64, or date32 columns are present, override the schema for those columns to string so that from_pandas doesn't attempt to cast them and fail
+        use_str_idx = timestamp_idx + time64_idx + date32_idx
+        if use_str_idx:
+            pandas_kwargs["schema"] = pa.schema([pa.field(f.name, pa.string()) if i in use_str_idx else f
+                                                  for i, f in enumerate(parquet_kwargs["schema"])])
+
+        ##### START STREAM #####
         parquet_writer = None
         partition = 1
         loop = 1
@@ -3506,13 +3523,15 @@ Will use HTML5 for this SASsession.""")
                 if loop == 1:
                     logging.info("Stream ready")
                 if loop == 1 and chunk == '':
-                    logging.warning("Query returned no rows.")
-                    return
+                    logging.info("Query returned no rows, will return empty parquet table with correct schema.")
+                    # Do not exit loop if there was no data in the sas dataset, we can still create an empty parquet file with the correct schema.
+                    #return
                 # create directory if partitioned
                 elif loop == 1 and partitioned:
                     os.makedirs(parquet_file_path)
 
-                if chunk == '':
+                # do not exit the loop on the first iteration, even if the chunk is empty.  This will set up everything so that we can create a parquet file with just the schema but no rows.
+                if loop != 1 and chunk == '':
                     logging.info("Done")
                     break
                 # for spark, it is better if large files are split over multiple partitions,
@@ -3533,16 +3552,17 @@ Will use HTML5 for this SASsession.""")
                           sep=colsep, lineterminator=rowsep, dtype=dts, na_values=miss, keep_default_na=False,
                           encoding='utf-8', quoting=quoting, **kwargs)
 
-                    for col in df.columns:
-                        if df[col].isnull().all():
-                            df[col] = df[col].astype(dts[col])
-                            df[col] = np.nan
+                    if not custom_schema:  # from_pandas(schema=...) already handles all-null columns correctly
+                        for col in df.columns:
+                            if df[col].isnull().all():
+                                df[col] = df[col].astype(dts[col])
+                                df[col] = np.nan
 
                     rows_read += len(df)
                     if static_columns:
                         df[[col[0] for col in static_columns]] = tuple([col[1] for col in static_columns])
 
-                    if k_dts is None:  # don't override these if user provided their own dtypes
+                    if k_dts is None and not custom_schema:  # don't override these if user provided their own dtypes or schema
                         for i in range(nvars):
                             if vartype[i] == 'N':
                                 if varcat[i] in self._sb.sas_date_fmts + self._sb.sas_time_fmts + self._sb.sas_datetime_fmts:
@@ -3557,6 +3577,20 @@ Will use HTML5 for this SASsession.""")
    Consider setting a different pd_timestamp_format or set coerce_timestamp_errors = True and they will be cast as Null""")
 
                     pa_table = pa.Table.from_pandas(df,**pandas_kwargs)
+
+                    #manually cast datetime, date, time columns to the correct type, since from_pandas does not support string->timestamp, string->date32, or string->time64 casts
+                    for i in timestamp_idx:
+                        col_name = dvarlist[i]
+                        casted_column = pc.cast(self._sb._parse_sas_ts_string(pa_table.column(col_name), varcat[i], col_name, coerce_timestamp_errors), pa.timestamp('us'))
+                        pa_table = pa_table.set_column(pa_table.column_names.index(col_name), col_name, casted_column)
+                    for i in time64_idx:
+                        col_name = dvarlist[i]
+                        casted_column = pc.cast(self._sb._parse_sas_ts_string(pa_table.column(col_name), varcat[i], col_name, coerce_timestamp_errors), pa.time64('us'))
+                        pa_table = pa_table.set_column(pa_table.column_names.index(col_name), col_name, casted_column)
+                    for i in date32_idx:
+                        col_name = dvarlist[i]
+                        casted_column = pc.cast(self._sb._parse_sas_ts_string(pa_table.column(col_name), varcat[i], col_name, coerce_timestamp_errors), pa.date32())
+                        pa_table = pa_table.set_column(pa_table.column_names.index(col_name), col_name, casted_column)
 
                     if not custom_schema:
                         #cast the int64 columns to timestamp
@@ -3887,8 +3921,8 @@ Will use HTML5 for this SASsession.""")
                 if loop == 1:
                     logging.info("Stream ready")
                 if loop == 1 and chunk == '':
-                    logging.warning("Query returned no rows.")
-                    return None
+                    logging.info("Query returned no rows, will return empty arrow table with correct schema.")
+                    return arrow_schema.empty_table()  # Return empty table with schema
 
                 if chunk == '':
                     logging.info("Done")
@@ -3926,19 +3960,7 @@ Will use HTML5 for this SASsession.""")
                         for i in ts_cols:
                             col_name = dvarlist[i]
                             str_col = pa_table.column(col_name)
-                            if varcat[i] in self._sb.sas_date_fmts:
-                                fmt = '%Y-%m-%d'
-                            elif varcat[i] in self._sb.sas_time_fmts:
-                                fmt = '%H:%M:%S.%f'
-                            else:
-                                fmt = '%Y-%m-%dT%H:%M:%S.%f'
-                            try:
-                                ts_col = pc.strptime(str_col, format=fmt, unit='ms', error_is_null=coerce_timestamp_errors)
-                            except Exception:
-                                if not coerce_timestamp_errors:
-                                    raise ValueError(f"The column {col_name} contains an unparseable timestamp. "
-                                       "Set coerce_timestamp_errors=True to cast as Null")
-                                ts_col = pc.strptime(str_col, format=fmt, unit='ms', error_is_null=True)
+                            ts_col = self._sb._parse_sas_ts_string(str_col, varcat[i], col_name, coerce_timestamp_errors)
                             pa_table = pa_table.set_column(pa_table.column_names.index(col_name), col_name, ts_col)
 
                     # Ensure schema matches for concat

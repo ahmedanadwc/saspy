@@ -3,7 +3,7 @@ Test suite for Arrow-related features in saspy.
 
 Tests the following functionality:
 1. Metadata enhancement: list_tables with labels, sasdata.schema
-2. Arrow support: arrow_char_lengths, sasdata2arrow, arrow2sasdata
+2. Arrow support: arrow_char_lengths, sasdata2arrow, arrow2sasdata,  importing sas datasets with no rows
 """
 
 import saspy
@@ -16,7 +16,11 @@ try:
     PYARROW_AVAILABLE = True
 except ImportError:
     PYARROW_AVAILABLE = False
-
+#import debugpy
+#debugpy.listen(5678)
+#print("Waiting for debugger attach")
+#debugpy.wait_for_client()
+#debugpy.breakpoint()
 
 @unittest.skipIf(not PYARROW_AVAILABLE, "pyarrow is not installed")
 class TestMetadataEnhancement(unittest.TestCase):
@@ -166,6 +170,86 @@ class TestArrowSupport(unittest.TestCase):
         df = result.to_df()
         self.assertEqual(len(df), 3)
 
+    def test_sd2arrow_format_inference(self):
+        """Test sd2arrow(include_attrs=True) resolves SAS date/time/datetime formats correctly.
+
+        Covers: a format missing an explicit width (date9), formats that were previously missing
+        from the canonical format lists and crashed with ArrowNotImplementedError (e8601da,
+        mdyampm, pdjulg, b8601tx), the NLSTRQTR collision (a numeric format whose name contains
+        'QTR' as a substring, which must stay numeric), and a character column with date-like
+        content (which must stay string rather than being swept into date detection).
+        """
+        import datetime
+
+        self.sas.submit("""
+            data work.test_fmt_inference;
+                _d   = '15SEP2026'd;
+                _dt  = dhms(_d, 13, 4, 22.5);
+                _tod = hms(13, 4, 22.5);
+
+                date_date9   = _d;   format date_date9   date9.;
+                date_iso     = _d;   format date_iso     e8601da.;
+                date_pdjulg  = _d;   format date_pdjulg  pdjulg.;
+                dt_datetime  = _dt;  format dt_datetime  datetime.;
+                dt_mdyampm   = _dt;  format dt_mdyampm   mdyampm.;
+                time_b8601tx = _tod; format time_b8601tx b8601tx.;
+                num_nlstrqtr = 2;    format num_nlstrqtr nlstrqtr5.;
+                char_date9   = put(_d, date9.);
+
+                drop _d _dt _tod;
+            run;
+        """)
+
+        arrow_table = self.sas.sd2arrow(table='test_fmt_inference', libref='work', include_attrs=True)
+        self.assertIsInstance(arrow_table, pa.Table)
+        s = arrow_table.schema
+
+        self.assertEqual(s.field('date_date9').type, pa.date32())
+        self.assertEqual(s.field('date_iso').type, pa.date32())
+        self.assertEqual(s.field('date_pdjulg').type, pa.date32())
+        self.assertEqual(s.field('dt_datetime').type, pa.timestamp('us'))
+        self.assertEqual(s.field('dt_mdyampm').type, pa.timestamp('us'))
+        self.assertEqual(s.field('time_b8601tx').type, pa.time64('us'))
+        self.assertEqual(s.field('num_nlstrqtr').type, pa.float64())
+        self.assertEqual(s.field('char_date9').type, pa.string())
+
+        # Type alone isn't enough: pc.strptime doesn't support the %f directive, which
+        # previously made every datetime/time value (they always carry fractional seconds
+        # on the wire) come back as a silent null despite the column reporting the correct
+        # type. Check the actual values, including the fractional-second component.
+        for col in ('dt_datetime', 'dt_mdyampm', 'time_b8601tx'):
+            self.assertEqual(arrow_table.column(col).null_count, 0, "%s came back null" % col)
+        df = arrow_table.to_pandas()
+        self.assertEqual(df['dt_datetime'][0], datetime.datetime(2026, 9, 15, 13, 4, 22, 500000))
+        self.assertEqual(df['time_b8601tx'][0], datetime.time(13, 4, 22, 500000))
+
+    def test_sas_dataset_with_no_rows(self):
+        """Test sasdata2arrow with sas dataset containing no rows"""
+        self.sas.submit("""proc sql; create table work.empty as select * from work.test_data where 1=0; quit;""")
+        arrow_table_empty = self.sas.sasdata2arrow(table='empty', libref='work')
+        #print("Arrow_table_empty = %s\n" % arrow_table_empty)
+        #print("Arrow_table_empty schema = %s \n" % arrow_table_empty.schema)
+        #print("Arrow_table_empty num_rows = %d\n" % arrow_table_empty.num_rows)
+        self.assertIsInstance(arrow_table_empty, pa.Table, "arrow_table_empty should be a pyarrow.Table but was %s" % type(arrow_table_empty))
+        self.assertEqual(arrow_table_empty.num_rows, 0, "The number of rows should have been 0 but was %d" % arrow_table_empty.num_rows)
+        self.assertEqual(arrow_table_empty.num_columns, 4, "The number of columns should have been 4 but was %d" % arrow_table_empty.num_columns)  # id, name, age, height
+
+        s1 = arrow_table_empty.schema
+
+        self.assertIn('id', s1.names, "The column names should have included 'id' but were %s" % arrow_table_empty.schema.names)
+        self.assertIn('name', s1.names, "The column names should have included 'id' but were %s" % arrow_table_empty.schema.names)
+        self.assertIn('age', s1.names, "The column names should have included 'id' but were %s" % arrow_table_empty.schema.names)
+        self.assertIn('height', s1.names, "The column names should have included 'id' but were %s" % arrow_table_empty.schema.names)
+
+        f1 = s1.field("id")
+        f2 = s1.field("name")
+        f3 = s1.field("age")
+        f4 = s1.field("height")
+
+        self.assertEqual(f1.type, pa.float64(), "The column type for 'id' should have been double but was %s" % f1.type)
+        self.assertEqual(f2.type, pa.string(), "The column type for 'name' should have been string but was %s" % f2.type)
+        self.assertEqual(f3.type, pa.float64(), "The column type for 'age' should have been double but was %s" % f3.type)
+        self.assertEqual(f4.type, pa.float64(), "The column type for 'height' should have been double but was %s" % f4.type)
 
 @unittest.skipIf(not PYARROW_AVAILABLE, "pyarrow is not installed")
 class TestArrowSpecialTypes(unittest.TestCase):

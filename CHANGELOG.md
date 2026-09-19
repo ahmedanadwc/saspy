@@ -1,12 +1,13 @@
 # Changelog
 
-## [5.109.0] - 2026-09-03
+## [5.110.0] - 2026-09-19
 
 ### Added
 
 -   `Feature` Polars DataFrame support: Native Polars DataFrame to SAS dataset conversion (polars2sasdata), SAS dataset to Polars DataFrame conversion (sasdata2polars), SAS dataset to Apache Arrow Table conversion (sasdata2arrow), streaming support for large datasets, automatic type mapping between SAS and Polars data types.
 -   `Feature` Optional dependency group `[polars]` for installing Polars and pyarrow extras: `pip install saspy[polars]`
 -   `Documentation` Added Polars and Apache Arrow documentation to getting started, advanced topics, and install guides.
+-   `Feature` Integrated upstream date/time/datetime format-family resolution (`vformatn`) and `_parse_sas_ts_string` into the Polars code paths.
 
 ### Changed
 
@@ -19,6 +20,106 @@
 ### Removed
 
 -   `None` Nothing Removed
+
+## [5.109.3] - 2026-09-18
+
+### Added
+
+-   `None` Nothing Added
+
+### Changed
+
+-   `None` Nothing Changed
+
+### Fixed
+
+-   `Bug Fix` Fixes date/time/datetime handling in sd2pq(use_arrow=False/include_attrs=True).  For date/time/datetime columns, data needs to be loaded as a string because from_pandas does not have a string->timestamp/string->time64/string->date32 cast kernel.  After loaded the data can be casted to the appropriate type.
+
+### Removed
+
+-   `None` Nothing removed
+
+## [5.109.2] - 2026-09-17
+
+### Added
+
+-   `None` Nothing Added
+
+### Changed
+
+-   `None` Nothing Changed
+
+### Fixed
+
+-   `Bug Fix` Fix so that date/time/datime datatypes will be detected correctly in HTTP access method.
+
+### Removed
+
+-   `None` Nothing removed
+
+## [5.109.1] - 2026-09-17
+
+### Added
+
+-   `Enhancement` Makes sd2pq/sasdata2parquet resolve SAS dates, datetimes, and times as date32, timestamp, and time64 instead of a generic timestamp. The native use_arrow=False path now uses the same schema resolution as use_arrow=True.
+
+-   `Enhancement` Added missing date/time formats to canonical SAS date, time, datetime format lists.
+
+-   `Enhancement` Changed include_attrs to default to True in sd2pq, matching sd2arrow.
+
+-   `Enhancement` Added test cases.
+
+### Changed
+
+-   `None` Nothing Changed
+
+### Fixed
+
+-   `Bug Fix` Fixes SAS to Arrow/Parquet type handling in sd2arrow and sd2pq(use_arrow=True) when include_attrs=True. Some types may cause errors when attempting to convert. Also added a fix where dates/datetimes may silently convert as null values but have a date or time type in an Arrow table.
+
+### Removed
+
+-   `None` Nothing removed
+
+## [5.109.0] - 2026-09-11
+
+### Added
+
+-   `Enhancement` sasdata2parquet() and sasdata2arrow() will now create empty parquet/arrow tables if the sas dataset is empty.  Added test cases for this behavior.
+
+### Changed
+
+-   `Enhancement` Cleanup debug messages in IOM access method
+
+### Fixed
+
+-   `Bug Fix` LOCAL IOM connection method was creating an extra SAS process on Windows and the extra process was orphaned.  This problem should now be fixed and only one process will be created and destroyed at the end of the session.
+
+-   `Bug Fix` When HTTP access method was used, sasdatat2parquet() was importing DATE types as a STRING.  That has been corrected.
+
+-   `Bug Fix` Cleanup test failures.
+
+### Removed
+
+-   `None` Nothing removed
+
+## [5.108.8] - 2026-09-09
+
+### Added
+
+-   `None` Nothing Added
+
+### Changed
+
+-   `None` Nothing Changed
+
+### Fixed
+
+-   `Bug Fix` Fixed some issues with threads and cleanup routines that were causing HTTP sessions to stay open for long periods of time.
+
+### Removed
+
+-   `None` Nothing removed
 
 ## [5.108.7] - 2026-09-01
 
@@ -242,15 +343,6 @@
 1. Conversion between SAS datasets and Apache Arrow tables
 2. Arrow-based Parquet conversion with optional parameter
 3. Support for converting Parquet files to SAS datasets via Arrow
-
--   `Enhancement` Added Polars DataFrame support:
-
-1. Native Polars DataFrame to SAS dataset conversion (polars2sasdata)
-2. SAS dataset to Polars DataFrame conversion (sasdata2polars)
-3. Streaming engine for large datasets (sasdata2polarsSTREAM, polars2sasdataSTREAM)
-4. Disk-based mode for very large datasets (sasdata2polarsDISK)
-5. LazyFrame support for query optimization
-6. Automatic type mapping between SAS and Polars data types
 
 - `Enhancement` Enhanced metadata retrieval:
 
