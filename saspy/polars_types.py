@@ -23,6 +23,7 @@ and Polars data types.
 """
 
 import logging
+import re
 from typing import Any, Dict, Optional, Union
 
 logger = logging.getLogger('saspy')
@@ -121,43 +122,28 @@ class PolarsTypeMapper:
 
         if sas_type == 'N' or sas_type == 'NUM':
             if sas_format:
-                fmt_upper = sas_format.upper()
-                if fmt_upper.endswith('.'):
-                    fmt_upper = fmt_upper[:-1]
-                if fmt_upper == 'DATE':
-                    return pl.Date
-                if fmt_upper.startswith('DDMMYY'):
-                    return pl.Date
-                if fmt_upper.startswith('MMDDYY'):
-                    return pl.Date
-                if fmt_upper.startswith('YYMMDD'):
-                    return pl.Date
-                if fmt_upper == 'YYQ' or fmt_upper == 'YYQR':
-                    return pl.Date
-                if fmt_upper in ('PDJULG', 'PDJULI', 'ENGDFTD'):
-                    return pl.Date
-                if fmt_upper == 'E8601DA':
-                    return pl.Date
-                if fmt_upper == 'DATETIME':
+                # Resolve the format family the same way sasdata.py's
+                # sas_to_arrow_type() does: exact membership against the
+                # canonical sas_date_fmts/sas_time_fmts/sas_datetime_fmts
+                # lists (populated from SAS's own vformatn()), rather than
+                # guessing per-format prefixes. varcat[i], as passed in by
+                # sasiostdio.py/sasioiom.py/sasiohttp.py, is already a bare
+                # format family; strip any trailing width/decimal suffix
+                # (e.g. 'MMDDYY10.' -> 'MMDDYY', 'E8601DT26.6' -> 'E8601DT')
+                # so a full format spec resolves the same way.
+                from .sasbase import sas_date_fmts, sas_time_fmts, sas_datetime_fmts
+
+                fmt_family = sas_format.upper().strip()
+                if fmt_family.endswith('.'):
+                    fmt_family = fmt_family[:-1]
+                fmt_family = re.sub(r'(\d*\.\d+|\d+)$', '', fmt_family)
+
+                if fmt_family in sas_datetime_fmts:
                     return pl.Datetime
-                if (
-                    fmt_upper.startswith('E8601DT')
-                    or fmt_upper.startswith('B8601DT')
-                    or fmt_upper.startswith('IS8601DT')
-                ):
-                    return pl.Datetime
-                if fmt_upper == 'DATEAMPM':
-                    return pl.Datetime
-                if fmt_upper == 'TIME':
+                if fmt_family in sas_time_fmts:
                     return pl.Time
-                if (
-                    fmt_upper.startswith('E8601TM')
-                    or fmt_upper.startswith('B8601TM')
-                    or fmt_upper.startswith('IS8601TM')
-                ):
-                    return pl.Time
-                if fmt_upper == 'TOD':
-                    return pl.Datetime
+                if fmt_family in sas_date_fmts:
+                    return pl.Date
             if not sas_format or sas_format.upper() in (
                 'BEST',
                 'BEST12',
