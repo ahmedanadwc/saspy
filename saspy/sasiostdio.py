@@ -1565,10 +1565,10 @@ Will use HTML5 for this SASsession.""")
 
         try:
             sock = socks.socket()
-            if self.sascfg.tunnel:
+            if not self.sascfg.ssh or self.sascfg.tunnel:
                 sock.bind(('localhost', port))
             else:
-                sock.bind(('', port))
+                sock.bind((self.sascfg.hostip, port))
             port = sock.getsockname()[1]
         except OSError:
             return {'Success' : False,
@@ -1693,10 +1693,10 @@ Will use HTML5 for this SASsession.""")
 
         try:
             sock = socks.socket()
-            if self.sascfg.tunnel:
+            if not self.sascfg.ssh or self.sascfg.tunnel:
                 sock.bind(('localhost', port))
             else:
-                sock.bind(('', port))
+                sock.bind((self.sascfg.hostip, port))
             port = sock.getsockname()[1]
         except OSError:
             return {'Success' : False,
@@ -1911,7 +1911,7 @@ Will use HTML5 for this SASsession.""")
          host = 'localhost' if not self.sascfg.ssh or self.sascfg.tunnel else self.sascfg.hostip
          try:
             sock = socks.socket()
-            sock.bind(('localhost' if self.sascfg.tunnel or not self.sascfg.ssh else '', port))
+            sock.bind(('localhost' if self.sascfg.tunnel or not self.sascfg.ssh else self.sascfg.hostip, port))
             port = sock.getsockname()[1]
          except OSError as e:
             raise e
@@ -2115,10 +2115,10 @@ Will use HTML5 for this SASsession.""")
 
             try:
                 sock = socks.socket()
-                if self.sascfg.tunnel:
+                if not self.sascfg.ssh or self.sascfg.tunnel:
                     sock.bind(('localhost', port))
                 else:
-                    sock.bind(('', port))
+                    sock.bind((self.sascfg.hostip, port))
                 port = sock.getsockname()[1]
             except OSError as e:
                 raise e
@@ -2525,10 +2525,10 @@ Will use HTML5 for this SASsession.""")
 
             try:
                 sock = socks.socket()
-                if self.sascfg.tunnel:
+                if not self.sascfg.ssh or self.sascfg.tunnel:
                     sock.bind(('localhost', port))
                 else:
-                    sock.bind(('', port))
+                    sock.bind((self.sascfg.hostip, port))
                 port = sock.getsockname()[1]
             except OSError as e:
                 raise e
@@ -2900,7 +2900,7 @@ Will use HTML5 for this SASsession.""")
       if not self.sascfg.ssh or self.sascfg.tunnel:
          sock.bind(('localhost', port))
       else:
-         sock.bind(('', port))
+         sock.bind((self.sascfg.hostip, port))
       port = sock.getsockname()[1]
       host = 'localhost' if self.sascfg.tunnel or not self.sascfg.ssh else self.sascfg.hostip
       
@@ -3100,7 +3100,7 @@ Will use HTML5 for this SASsession.""")
             if not self.sascfg.ssh or self.sascfg.tunnel:
                 sock.bind(('localhost', port))
             else:
-                sock.bind(('', port))
+                sock.bind((self.sascfg.hostip, port))
             port = sock.getsockname()[1]
         except OSError:
             logger.error('Error try to open a socket in the sasdata2dataframe method. Call failed.')
@@ -3326,7 +3326,7 @@ Will use HTML5 for this SASsession.""")
             if not self.sascfg.ssh or self.sascfg.tunnel:
                 sock.bind(('localhost', port))
             else:
-                sock.bind(('', port))
+                sock.bind((self.sascfg.hostip, port))
             port = sock.getsockname()[1]
         except OSError:
             logger.error('Error try to open a socket in the sasdata2dataframe method. Call failed.')
@@ -3615,7 +3615,7 @@ Will use HTML5 for this SASsession.""")
             if not self.sascfg.ssh or self.sascfg.tunnel:
                 sock.bind(('localhost', port))
             else:
-                sock.bind(('', port))
+                sock.bind((self.sascfg.hostip, port))
             port = sock.getsockname()[1]
         except OSError:
             logger.error('Error try to open a socket in the sasdata2dataframe method. Call failed.')
@@ -3803,12 +3803,29 @@ Will use HTML5 for this SASsession.""")
             schema = pa.schema(fields)
             return schema
         # derive parque schema if not defined by user.
+        timestamp_idx = []
+        time64_idx = []
+        date32_idx = []
         if "schema" not in parquet_kwargs or parquet_kwargs["schema"] is None:
             custom_schema = False
             parquet_kwargs["schema"] = dts_to_pyarrow_schema(dts)
         else:
             custom_schema = True
+
+            # from_pandas has no string->timestamp/string->time64/string->date32 cast kernel,
+            # so those columns are streamed as strings and routed through _parse_sas_ts_string
+            # afterwards instead, as sasdata2arrow does, rather than letting from_pandas attempt
+            # (and fail) the cast itself.
+            timestamp_idx = [i for i in range(nvars) if pa.types.is_timestamp(parquet_kwargs["schema"].field(dvarlist[i]).type)]
+            time64_idx = [i for i in range(nvars) if pa.types.is_time(parquet_kwargs["schema"].field(dvarlist[i]).type)]
+            date32_idx = [i for i in range(nvars) if pa.types.is_date32(parquet_kwargs["schema"].field(dvarlist[i]).type)]
         pandas_kwargs["schema"] = parquet_kwargs["schema"]
+
+        #if any timestamp, time64, or date32 columns are present, override the schema for those columns to string so that from_pandas doesn't attempt to cast them and fail
+        use_str_idx = timestamp_idx + time64_idx + date32_idx
+        if use_str_idx:
+            pandas_kwargs["schema"] = pa.schema([pa.field(f.name, pa.string()) if i in use_str_idx else f
+                                                  for i, f in enumerate(parquet_kwargs["schema"])])
 
         ##### START STERAM #####
         parquet_writer = None
@@ -3837,13 +3854,15 @@ Will use HTML5 for this SASsession.""")
                 if loop == 1:
                     logging.info("Stream ready")
                 if loop == 1 and chunk == '':
-                    logging.warning("Query returned no rows.")
-                    return
+                    logging.info("Query returned no rows, will create empty parquet table with correct schema.")
+                    # Do not exit loop if there was no data in the sas dataset, we can still create an empty parquet file with the correct schema.
+                    #return
                 # create directory if partitioned
                 elif loop == 1 and partitioned:
                     os.makedirs(parquet_file_path)
 
-                if chunk == '':
+                # do not exit the loop on the first iteration, even if the chunk is empty.  This will set up everything so that we can create a parquet file with just the schema but no rows.
+                if loop != 1 and chunk == '':
                     logging.info("Done")
                     break
                 # for spark, it is better if large files are split over multiple partitions,
@@ -3864,16 +3883,17 @@ Will use HTML5 for this SASsession.""")
                                      sep=colsep, lineterminator=rowsep, dtype=dts, na_values=miss, keep_default_na=False,
                                      encoding='utf-8', quoting=quoting, **kwargs)
 
-                    for col in df.columns:
-                        if df[col].isnull().all():
-                            df[col] = df[col].astype(dts[col])
-                            df[col] = np.nan
+                    if not custom_schema:  # from_pandas(schema=...) already handles all-null columns correctly
+                        for col in df.columns:
+                            if df[col].isnull().all():
+                                df[col] = df[col].astype(dts[col])
+                                df[col] = np.nan
 
                     rows_read += len(df)
                     if static_columns:
                         df[[col[0] for col in static_columns]] = tuple([col[1] for col in static_columns])
 
-                    if k_dts is None:  # don't override these if user provided their own dtypes
+                    if k_dts is None and not custom_schema:  # don't override these if user provided their own dtypes or schema
                         for i in range(nvars):
                             if vartype[i] == 'N':
                                 if varcat[i] in self._sb.sas_date_fmts + self._sb.sas_time_fmts + self._sb.sas_datetime_fmts:
@@ -3888,6 +3908,20 @@ Will use HTML5 for this SASsession.""")
    Consider setting a different pd_timestamp_format or set coerce_timestamp_errors = True and they will be cast as Null""")
 
                     pa_table = pa.Table.from_pandas(df,**pandas_kwargs)
+
+                    #manually cast datetime, date, time columns to the correct type, since from_pandas does not support string->timestamp, string->date32, or string->time64 casts
+                    for i in timestamp_idx:
+                        col_name = dvarlist[i]
+                        casted_column = pc.cast(self._sb._parse_sas_ts_string(pa_table.column(col_name), varcat[i], col_name, coerce_timestamp_errors), pa.timestamp('us'))
+                        pa_table = pa_table.set_column(pa_table.column_names.index(col_name), col_name, casted_column)
+                    for i in time64_idx:
+                        col_name = dvarlist[i]
+                        casted_column = pc.cast(self._sb._parse_sas_ts_string(pa_table.column(col_name), varcat[i], col_name, coerce_timestamp_errors), pa.time64('us'))
+                        pa_table = pa_table.set_column(pa_table.column_names.index(col_name), col_name, casted_column)
+                    for i in date32_idx:
+                        col_name = dvarlist[i]
+                        casted_column = pc.cast(self._sb._parse_sas_ts_string(pa_table.column(col_name), varcat[i], col_name, coerce_timestamp_errors), pa.date32())
+                        pa_table = pa_table.set_column(pa_table.column_names.index(col_name), col_name, casted_column)
 
                     if not custom_schema:
                         #cast the int64 columns to timestamp
@@ -4074,7 +4108,7 @@ Will use HTML5 for this SASsession.""")
             if not self.sascfg.ssh or self.sascfg.tunnel:
                 sock.bind(('localhost', port))
             else:
-                sock.bind(('', port))
+                sock.bind((self.sascfg.hostip, port))
             port = sock.getsockname()[1]
         except OSError:
             logger.error('Error try to open a socket in the sasdata2arrow method. Call failed.')
@@ -4234,8 +4268,8 @@ Will use HTML5 for this SASsession.""")
                 if loop == 1:
                     logging.info("Stream ready")
                 if loop == 1 and chunk == '':
-                    logging.warning("Query returned no rows.")
-                    return None
+                    logging.info("Query returned no rows, will return empty arrow table with correct schema.")
+                    return arrow_schema.empty_table()  # Return empty table with schema
 
                 if chunk == '':
                     logging.info("Done")
@@ -4273,19 +4307,7 @@ Will use HTML5 for this SASsession.""")
                         for i in ts_cols:
                             col_name = dvarlist[i]
                             str_col = pa_table.column(col_name)
-                            if varcat[i] in self._sb.sas_date_fmts:
-                                fmt = '%Y-%m-%d'
-                            elif varcat[i] in self._sb.sas_time_fmts:
-                                fmt = '%H:%M:%S.%f'
-                            else:
-                                fmt = '%Y-%m-%dT%H:%M:%S.%f'
-                            try:
-                                ts_col = pc.strptime(str_col, format=fmt, unit='ms', error_is_null=coerce_timestamp_errors)
-                            except Exception:
-                                if not coerce_timestamp_errors:
-                                    raise ValueError(f"The column {col_name} contains an unparseable timestamp. "
-                                       "Set coerce_timestamp_errors=True to cast as Null")
-                                ts_col = pc.strptime(str_col, format=fmt, unit='ms', error_is_null=True)
+                            ts_col = self._sb._parse_sas_ts_string(str_col, varcat[i], col_name, coerce_timestamp_errors)
                             pa_table = pa_table.set_column(pa_table.column_names.index(col_name), col_name, ts_col)
 
                     # Ensure schema matches for concat
